@@ -1,6 +1,6 @@
-# AI Document Reader — 本地优先的 AI 文档阅读器
+# AI Document Reader v0.1.1 — 首个公开版本 🎉
 
-左侧读 **PDF / Word / PPT**,右侧**双 AI 聊天**:Chat 1 管全局摘要,Chat 2 管细节追问(自动携带你选中的原文和 Chat 1 的上下文)。基于 **Tauri v2(Rust + React)**,轻量、快、不臃肿。
+本地优先的 AI 文档阅读器:左侧读 **PDF / Word / PPT**,右侧**双 AI 聊天**——Chat 1 管全局摘要,Chat 2 管细节追问(自动携带你选中的原文和 Chat 1 的上下文)。基于 **Tauri v2(Rust + React)**,轻量、快、不臃肿。
 
 ## ✨ 亮点
 
