@@ -82,12 +82,12 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
-      # Portable exe only — no NSIS/MSI installer by design.
-      # The exe needs the WebView2 Runtime (preinstalled on Win11 / recent Win10).
-      - name: Build (portable exe)
-        run: npm run tauri build -- --no-bundle
+      # One build, two artifacts: NSIS setup exe (bootstraps the WebView2
+      # runtime automatically) + a portable exe zip for install-free use.
+      - name: Build (NSIS installer + exe)
+        run: npm run tauri build -- --bundles nsis
 
-      - name: Package artifact
+      - name: Package artifacts
         shell: pwsh
         run: |
           if ($env:GITHUB_REF -like 'refs/tags/*') {
@@ -95,12 +95,19 @@ jobs:
           } else {
             $version = 'dev-' + $env:GITHUB_SHA.Substring(0, 7)
           }
+          New-Item -ItemType Directory -Force -Path dist-release | Out-Null
+
+          # NSIS setup installer
+          $setup = Get-ChildItem 'src-tauri/target/release/bundle/nsis/*-setup.exe' | Select-Object -First 1
+          if (-not $setup) { throw 'No NSIS setup exe produced' }
+          Copy-Item $setup.FullName "dist-release/${env:APP_NAME}_${version}_windows-x64-setup.exe"
+
+          # Portable exe (top-level of target/release only — excludes bundle/)
           $exe = Get-ChildItem 'src-tauri/target/release/*.exe' | Select-Object -First 1
           if (-not $exe) { throw 'No exe produced' }
           $stage = "stage/$env:APP_NAME"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item $exe.FullName "$stage/AI Document Reader.exe"
-          New-Item -ItemType Directory -Force -Path dist-release | Out-Null
           Compress-Archive -Path "stage/$env:APP_NAME" `
             -DestinationPath "dist-release/${env:APP_NAME}_${version}_windows-x64-portable.zip" -Force
           Get-ChildItem dist-release

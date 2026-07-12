@@ -28,13 +28,14 @@
 |---|---|---|
 | macOS(Apple Silicon + Intel 通用) | `*_macos-universal.dmg` | 打开后拖入「应用程序」 |
 | macOS 免安装 | `*_macos-universal.app.tar.gz` | 解压即用 |
-| Windows 10/11(x64) | `*_windows-x64-portable.zip` | 免安装,解压后直接运行 exe |
+| Windows 10/11(x64)**推荐** | `*_windows-x64-setup.exe` | 安装器,会自动安装缺失的 WebView2 |
+| Windows 免安装 | `*_windows-x64-portable.zip` | 解压直接运行 exe(需系统已有 WebView2) |
 
 ## ⚠️ 安装提示
 
 - **macOS**:应用暂未签名/公证,首次启动请**右键 → 打开**;若被隔离可执行
   `xattr -dr com.apple.quarantine "/Applications/AI Document Reader.app"`
-- **Windows**:依赖 WebView2 Runtime(Win11 与新版 Win10 自带;缺失时安装 [Microsoft Edge WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) 即可)
+- **Windows**:推荐用 setup 安装器(缺 WebView2 时会自动装);便携版需系统已有 WebView2 Runtime(Win11 与新版 Win10 自带,缺失可装 [Microsoft Edge WebView2](https://developer.microsoft.com/microsoft-edge/webview2/))
 - **Office 转换**:打开 Word/PPT 需要本机有转换引擎 — macOS 推荐装 [LibreOffice](https://www.libreoffice.org/download/)(有 MS Office 或 Pages/Keynote 也行,首次会弹一次自动化授权);Windows 需装有 Microsoft Office。纯 PDF 无需任何引擎
 - **AI 使用**:云端模型请在右上角设置里选择提供方并填入自己的 API Key;本地模型免 Key,首次使用需联网下载模型权重
 
