@@ -1,10 +1,16 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
+// Returns the raw bytes (ArrayBuffer on the JS side) — vastly faster than the
+// default JSON number-array serialization for multi-MB documents.
 #[tauri::command]
-async fn read_file_buffer(file_path: String) -> Result<Vec<u8>, String> {
-    std::fs::read(&file_path).map_err(|e| e.to_string())
+async fn read_file_buffer(file_path: String) -> Result<tauri::ipc::Response, String> {
+    std::fs::read(&file_path)
+        .map(tauri::ipc::Response::new)
+        .map_err(|e| e.to_string())
 }
 
 fn is_office_ext(ext: &str) -> bool {
@@ -413,6 +419,30 @@ struct LlmRequest {
     base_url: Option<String>,
     #[serde(default)]
     vertex: Option<VertexCreds>,
+    /// Correlates a streaming request with llm_cancel.
+    #[serde(default)]
+    request_id: Option<String>,
+}
+
+// Streaming cancellation: ids the frontend has asked to stop.
+static CANCELLED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn is_cancelled(id: &Option<String>) -> bool {
+    match id {
+        Some(id) => CANCELLED.lock().unwrap().contains(id),
+        None => false,
+    }
+}
+
+fn clear_cancel(id: &Option<String>) {
+    if let Some(id) = id {
+        CANCELLED.lock().unwrap().remove(id);
+    }
+}
+
+#[tauri::command]
+fn llm_cancel(request_id: String) {
+    CANCELLED.lock().unwrap().insert(request_id);
 }
 
 #[tauri::command]
@@ -425,17 +455,19 @@ async fn llm_chat(req: LlmRequest) -> Result<String, String> {
     }
 }
 
-async fn openai_chat(req: &LlmRequest) -> Result<String, String> {
+fn openai_url_and_key(req: &LlmRequest) -> Result<(String, String), String> {
     let api_key = req
         .api_key
-        .as_ref()
+        .clone()
         .ok_or("OpenAI API key is required")?;
     let base = req
         .base_url
         .clone()
         .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+    Ok((format!("{}/chat/completions", base.trim_end_matches('/')), api_key))
+}
 
+fn build_openai_body(req: &LlmRequest, stream: bool) -> serde_json::Value {
     let mut messages: Vec<serde_json::Value> = Vec::new();
     if !req.system.is_empty() {
         messages.push(json!({ "role": "system", "content": req.system }));
@@ -459,13 +491,19 @@ async fn openai_chat(req: &LlmRequest) -> Result<String, String> {
             messages.push(json!({ "role": role, "content": parts }));
         }
     }
+    let mut body = json!({ "model": req.model, "messages": messages, "temperature": 0.2 });
+    if stream {
+        body["stream"] = json!(true);
+    }
+    body
+}
 
-    let body = json!({ "model": req.model, "messages": messages, "temperature": 0.2 });
-
+async fn openai_chat(req: &LlmRequest) -> Result<String, String> {
+    let (url, api_key) = openai_url_and_key(req)?;
     let resp = reqwest::Client::new()
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
-        .json(&body)
+        .json(&build_openai_body(req, false))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -584,6 +622,155 @@ async fn vertex_chat(req: &LlmRequest) -> Result<String, String> {
     parse_gemini_response(&text)
 }
 
+// ---------------------------------------------------------------------------
+// Streaming variants: same providers, but deltas are pushed to the frontend
+// over a Tauri Channel as they arrive. The command also returns the full text.
+// ---------------------------------------------------------------------------
+
+/// Reads an SSE body, invoking `on_data` for every `data:` line payload.
+/// `on_data` returns false to stop early (cancel / [DONE]).
+async fn read_sse<F: FnMut(&str) -> bool>(
+    resp: reqwest::Response,
+    mut on_data: F,
+) -> Result<(), String> {
+    use futures_util::StreamExt;
+    let mut stream = resp.bytes_stream();
+    let mut buf = String::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(pos) = buf.find('\n') {
+            let line: String = buf.drain(..=pos).collect();
+            let line = line.trim_end();
+            if let Some(data) = line.strip_prefix("data:") {
+                if !on_data(data.trim_start()) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Extract the text delta from a Gemini/Vertex streaming chunk.
+fn gemini_chunk_text(v: &serde_json::Value) -> String {
+    v["candidates"][0]["content"]["parts"]
+        .as_array()
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|p| p["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+async fn llm_chat_stream(
+    req: LlmRequest,
+    on_delta: tauri::ipc::Channel<String>,
+) -> Result<String, String> {
+    let result = llm_chat_stream_inner(&req, &on_delta).await;
+    clear_cancel(&req.request_id);
+    result
+}
+
+async fn llm_chat_stream_inner(
+    req: &LlmRequest,
+    on_delta: &tauri::ipc::Channel<String>,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+
+    let resp = match req.provider.as_str() {
+        "openai" => {
+            let (url, api_key) = openai_url_and_key(req)?;
+            client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .json(&build_openai_body(req, true))
+                .send()
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        "gemini" => {
+            let api_key = req.api_key.as_ref().ok_or("Gemini API key is required")?;
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse",
+                req.model
+            );
+            client
+                .post(&url)
+                .header("x-goog-api-key", api_key.as_str())
+                .json(&build_gemini_body(req))
+                .send()
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        "vertex" => {
+            let creds = req.vertex.as_ref().ok_or(
+                "Vertex credentials (project, location, service account JSON) are required",
+            )?;
+            let token = mint_vertex_token(&creds.service_account_json).await?;
+            let url = format!(
+                "https://{loc}-aiplatform.googleapis.com/v1/projects/{proj}/locations/{loc}/publishers/google/models/{model}:streamGenerateContent?alt=sse",
+                loc = creds.location,
+                proj = creds.project,
+                model = req.model
+            );
+            client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", token))
+                .json(&build_gemini_body(req))
+                .send()
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        other => return Err(format!("Unknown provider: {}", other)),
+    };
+
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("{} API error ({}): {}", req.provider, status, text));
+    }
+
+    let is_openai = req.provider == "openai";
+    let mut full = String::new();
+    read_sse(resp, |data| {
+        if is_cancelled(&req.request_id) {
+            return false;
+        }
+        if is_openai && data == "[DONE]" {
+            return false;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+            let delta = if is_openai {
+                v["choices"][0]["delta"]["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string()
+            } else {
+                gemini_chunk_text(&v)
+            };
+            if !delta.is_empty() {
+                full.push_str(&delta);
+                let _ = on_delta.send(delta);
+            }
+        }
+        true
+    })
+    .await?;
+
+    Ok(full)
+}
+
+// Write a text file (used for exporting conversations via the save dialog).
+#[tauri::command]
+fn write_text_file(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, content).map_err(|e| e.to_string())
+}
+
 #[derive(Deserialize)]
 struct ServiceAccountKey {
     client_email: String,
@@ -691,6 +878,9 @@ pub fn run() {
             read_file_buffer,
             convert_to_pdf_if_needed,
             llm_chat,
+            llm_chat_stream,
+            llm_cancel,
+            write_text_file,
             secret_set,
             secret_get,
             secret_delete

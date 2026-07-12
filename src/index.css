@@ -97,3 +97,255 @@ button {
 button:hover {
   background-color: #1177bb;
 }
+
+/* ---- Chat pane ---- */
+.pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pane-title {
+  flex: 1;
+  text-align: center;
+}
+
+.pane-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.icon-btn {
+  background: transparent;
+  border: none;
+  color: #999;
+  padding: 3px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+}
+
+.icon-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.chat-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-hint {
+  font-size: 0.8rem;
+  color: #888;
+}
+
+.chat-status {
+  font-size: 0.75rem;
+  color: #e0a94a;
+}
+
+.msg {
+  position: relative;
+  max-width: 92%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  animation: msg-in 0.18s ease-out;
+}
+
+@keyframes msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.msg-user {
+  align-self: flex-end;
+  background: #0e639c;
+  color: #fff;
+}
+
+.msg-assistant {
+  align-self: flex-start;
+  background: #333;
+}
+
+.msg-system {
+  align-self: flex-start;
+  background: #52322e;
+  color: #f0b9b0;
+}
+
+.msg-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.msg-img-tag {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.72rem;
+  opacity: 0.75;
+}
+
+.msg-copy {
+  position: absolute;
+  right: 4px;
+  bottom: -18px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.msg:hover .msg-copy {
+  opacity: 1;
+}
+
+/* Markdown content */
+.md {
+  word-break: break-word;
+}
+
+.md p,
+.md ul,
+.md ol,
+.md pre,
+.md table,
+.md blockquote {
+  margin: 0 0 8px;
+}
+
+.md > *:last-child {
+  margin-bottom: 0;
+}
+
+.md ul,
+.md ol {
+  padding-left: 20px;
+}
+
+.md code {
+  background: rgba(255, 255, 255, 0.1);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+
+.md pre {
+  background: #1a1a1a;
+  padding: 10px;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+.md pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.md table {
+  border-collapse: collapse;
+}
+
+.md th,
+.md td {
+  border: 1px solid #555;
+  padding: 4px 8px;
+}
+
+.md blockquote {
+  border-left: 3px solid #555;
+  padding-left: 10px;
+  color: #aaa;
+}
+
+.md a {
+  color: #4fb3ff;
+}
+
+/* Streaming indicators */
+.stream-cursor {
+  animation: blink 1s steps(1) infinite;
+  color: #4fb3ff;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.typing-dots {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.typing-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #888;
+  animation: dot-bounce 1.2s infinite ease-in-out;
+}
+
+.typing-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes dot-bounce {
+  0%,
+  60%,
+  100% {
+    transform: none;
+    opacity: 0.5;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+/* Input row */
+.chat-input-container {
+  gap: 6px;
+}
+
+.send-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  border-radius: 4px;
+}
+
+.send-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.send-btn.stop {
+  background: #8b3a3a;
+}
+
+.send-btn.stop:hover {
+  background: #a54545;
+}

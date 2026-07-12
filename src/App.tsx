@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef, KeyboardEvent, CSSProperties } from 'react';
+import { useState, useEffect, useRef, CSSProperties } from 'react';
 import './index.css';
 import { DocumentViewer } from './components/DocumentViewer';
 import type { DocumentViewerHandle } from './components/DocumentViewer';
-import { AIAgent } from './lib/agent';
+import { ChatPane } from './components/ChatPane';
+import { AIAgent, cancelLlm } from './lib/agent';
 import type { ChatMsg, Provider, ProviderConfig } from './lib/agent';
 import { secretGet, secretSet, secretDelete } from './lib/secrets';
 import { extractTextFromPDF } from './lib/pdf';
@@ -16,15 +17,20 @@ const DEFAULT_MODELS: Record<Provider, string> = {
   local: 'Xenova/Qwen1.5-0.5B-Chat',
 };
 
-// Small helper for persisted string state (keys/config survive restarts).
-// NOTE: localStorage is convenient but not a secure vault — the Vertex service
-// account JSON in particular is sensitive. Fine for a local MVP; revisit later.
+// Small helper for persisted string state (non-secret config only).
 const persisted = (key: string, fallback: string) =>
   localStorage.getItem(key) ?? fallback;
+
+const chatStorageKey = (fp: string | null) => `chats:${fp ?? 'none'}`;
+
+// Persist at most the last 100 messages, without base64 images (size).
+const stripForStorage = (ms: ChatMsg[]) =>
+  ms.slice(-100).map(({ images: _images, ...rest }) => rest);
 
 function App() {
   const [filePath, setFilePath] = useState<string | null>(null);
   const [docText, setDocText] = useState<string>('');
+  const [docLoading, setDocLoading] = useState<string>('');
   const [selectedText, setSelectedText] = useState<string>('');
 
   // Vision: when enabled, attach the currently-visible page image to outgoing
@@ -94,52 +100,80 @@ function App() {
     else secretDelete('vertex_sa_json').catch(() => {});
   };
 
+  // ---- Chat state (persisted per document) ------------------------------
   const [chat1Msgs, setChat1Msgs] = useState<ChatMsg[]>([]);
-  const [chat1Input, setChat1Input] = useState('');
   const [isChat1Loading, setIsChat1Loading] = useState(false);
+  const chat1Req = useRef<string | null>(null);
 
   const [chat2Msgs, setChat2Msgs] = useState<ChatMsg[]>([]);
-  const [chat2Input, setChat2Input] = useState('');
   const [isChat2Loading, setIsChat2Loading] = useState(false);
+  const chat2Req = useRef<string | null>(null);
 
-  const handleProviderChange = (p: Provider) => {
-    setProvider(p);
-    setModel(DEFAULT_MODELS[p]);
-  };
+  // Guards the save effect so a document switch can't clobber the new
+  // document's history with the previous one's messages.
+  const chatsLoadedFor = useRef<string | null | undefined>(undefined);
 
-  const handleOpenFile = async () => {
+  // SAVE (declared before LOAD on purpose — on a filePath change this runs
+  // first with the stale loadedFor and skips, then LOAD re-points it).
+  useEffect(() => {
+    if (chatsLoadedFor.current !== filePath) return;
     try {
-      const selected = await open({
-        multiple: false,
-        filters: [{ name: 'Documents', extensions: ['pdf', 'docx', 'pptx', 'doc', 'ppt'] }],
-      });
+      localStorage.setItem(
+        chatStorageKey(filePath),
+        JSON.stringify({ chat1: stripForStorage(chat1Msgs), chat2: stripForStorage(chat2Msgs) })
+      );
+    } catch {
+      /* storage full — skip */
+    }
+  }, [chat1Msgs, chat2Msgs, filePath]);
 
-      if (selected && typeof selected === 'string') {
-        // Rust backend command to handle conversion for Office files
-        const processedPath = await invoke<string>('convert_to_pdf_if_needed', {
-          filePath: selected,
-        });
+  // LOAD chat history for the current document.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(chatStorageKey(filePath));
+      const saved = raw ? JSON.parse(raw) : null;
+      setChat1Msgs(Array.isArray(saved?.chat1) ? saved.chat1 : []);
+      setChat2Msgs(Array.isArray(saved?.chat2) ? saved.chat2 : []);
+    } catch {
+      setChat1Msgs([]);
+      setChat2Msgs([]);
+    }
+    chatsLoadedFor.current = filePath;
+  }, [filePath]);
 
-        setFilePath(processedPath);
-        setDocText('');
+  // ---- Document open -----------------------------------------------------
+  const openPath = async (path: string) => {
+    setDocLoading('正在转换 / 加载文档…');
+    try {
+      // Rust backend command to handle conversion for Office files
+      const processedPath = await invoke<string>('convert_to_pdf_if_needed', { filePath: path });
+      setFilePath(processedPath);
+      setDocText('');
+      setSelectedText('');
 
-        // Read the file as a byte array
-        const bufferArray = await invoke<number[]>('read_file_buffer', {
-          filePath: processedPath,
-        });
-        const buffer = new Uint8Array(bufferArray);
-
-        if (buffer) {
-          const text = await extractTextFromPDF(buffer);
-          setDocText(text);
-        }
-      }
+      // Raw bytes come back as an ArrayBuffer (binary IPC).
+      const buffer = await invoke<ArrayBuffer>('read_file_buffer', { filePath: processedPath });
+      const text = await extractTextFromPDF(new Uint8Array(buffer));
+      setDocText(text);
     } catch (err: any) {
       console.error(err);
-      alert(`Failed to open document: ${err.message || err}`);
+      alert(`打开文档失败: ${err.message || err}`);
+    } finally {
+      setDocLoading('');
     }
   };
 
+  const handleOpenFile = async () => {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: 'Documents', extensions: ['pdf', 'docx', 'pptx', 'doc', 'ppt'] }],
+    });
+    if (selected && typeof selected === 'string') {
+      await openPath(selected);
+    }
+  };
+
+  // ---- Agent -------------------------------------------------------------
   const getAgent = (): AIAgent | null => {
     if (provider === 'local') {
       // Offline, in-WebView model — no credentials needed.
@@ -148,7 +182,7 @@ function App() {
 
     if (provider === 'vertex') {
       if (!vertexProject || !vertexLocation || !vertexSaJson) {
-        alert('Vertex requires a project, location, and service account JSON.');
+        alert('Vertex 需要填写 GCP Project、Location 和服务账号 JSON。');
         return null;
       }
       const config: ProviderConfig = {
@@ -164,7 +198,7 @@ function App() {
     }
 
     if (!apiKey) {
-      alert(`Please enter your ${provider === 'openai' ? 'OpenAI' : 'Gemini'} API key first.`);
+      alert(`请先填写 ${provider === 'openai' ? 'OpenAI' : 'Gemini'} API Key。`);
       return null;
     }
     return new AIAgent({ provider, model, apiKey });
@@ -180,50 +214,71 @@ function App() {
     return msg;
   };
 
-  const handleChat1Submit = async (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter' && chat1Input.trim()) {
-      const agent = getAgent();
-      if (!agent) return;
+  // Append a streaming delta to the trailing assistant message.
+  const appendDelta = (setMsgs: React.Dispatch<React.SetStateAction<ChatMsg[]>>) => (d: string) =>
+    setMsgs((prev) => {
+      const last = prev[prev.length - 1];
+      if (!last || last.role !== 'assistant') return prev;
+      return [...prev.slice(0, -1), { ...last, content: last.content + d }];
+    });
 
-      const newMsgs: ChatMsg[] = [...chat1Msgs, buildUserMsg(chat1Input)];
-      setChat1Msgs(newMsgs);
-      setChat1Input('');
-      setIsChat1Loading(true);
+  const sendChat1 = async (text: string) => {
+    const agent = getAgent();
+    if (!agent) return;
 
-      try {
-        const reply = await agent.askGlobalContext(newMsgs, docText);
-        setChat1Msgs([...newMsgs, { role: 'assistant', content: reply }]);
-      } catch (err: any) {
-        setChat1Msgs([...newMsgs, { role: 'system', content: `Error: ${err.message || err}` }]);
-      } finally {
-        setIsChat1Loading(false);
-      }
+    const base: ChatMsg[] = [...chat1Msgs, buildUserMsg(text)];
+    setChat1Msgs([...base, { role: 'assistant', content: '' }]);
+    setIsChat1Loading(true);
+    const requestId = crypto.randomUUID();
+    chat1Req.current = requestId;
+
+    try {
+      const reply = await agent.askGlobalContext(base, docText, {
+        requestId,
+        onDelta: appendDelta(setChat1Msgs),
+      });
+      setChat1Msgs([...base, { role: 'assistant', content: reply }]);
+    } catch (err: any) {
+      setChat1Msgs([...base, { role: 'system', content: `Error: ${err.message || err}` }]);
+    } finally {
+      setIsChat1Loading(false);
+      chat1Req.current = null;
     }
   };
 
-  const handleChat2Submit = async (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter' && chat2Input.trim()) {
-      const agent = getAgent();
-      if (!agent) return;
+  const sendChat2 = async (text: string) => {
+    const agent = getAgent();
+    if (!agent) return;
 
-      const prompt = selectedText
-        ? `Regarding the selected text: "${selectedText}"\n\n${chat2Input}`
-        : chat2Input;
+    const prompt = selectedText
+      ? `Regarding the selected text: "${selectedText}"\n\n${text}`
+      : text;
 
-      const newMsgs: ChatMsg[] = [...chat2Msgs, buildUserMsg(prompt)];
-      setChat2Msgs(newMsgs);
-      setChat2Input('');
-      setIsChat2Loading(true);
+    const base: ChatMsg[] = [...chat2Msgs, buildUserMsg(prompt)];
+    setChat2Msgs([...base, { role: 'assistant', content: '' }]);
+    setIsChat2Loading(true);
+    const requestId = crypto.randomUUID();
+    chat2Req.current = requestId;
 
-      try {
-        const reply = await agent.askDetail(chat1Msgs, newMsgs, docText, selectedText);
-        setChat2Msgs([...newMsgs, { role: 'assistant', content: reply }]);
-      } catch (err: any) {
-        setChat2Msgs([...newMsgs, { role: 'system', content: `Error: ${err.message || err}` }]);
-      } finally {
-        setIsChat2Loading(false);
-      }
+    try {
+      const reply = await agent.askDetail(chat1Msgs, base, docText, selectedText, {
+        requestId,
+        onDelta: appendDelta(setChat2Msgs),
+      });
+      setChat2Msgs([...base, { role: 'assistant', content: reply }]);
+    } catch (err: any) {
+      setChat2Msgs([...base, { role: 'system', content: `Error: ${err.message || err}` }]);
+    } finally {
+      setIsChat2Loading(false);
+      chat2Req.current = null;
     }
+  };
+
+  const stopChat1 = () => {
+    if (chat1Req.current) cancelLlm(chat1Req.current).catch(() => {});
+  };
+  const stopChat2 = () => {
+    if (chat2Req.current) cancelLlm(chat2Req.current).catch(() => {});
   };
 
   const inputStyle: CSSProperties = {
@@ -341,7 +396,9 @@ function App() {
             justifyContent: filePath ? 'flex-start' : 'center',
           }}
         >
-          {filePath ? (
+          {docLoading ? (
+            <p style={{ color: '#888' }}>{docLoading}</p>
+          ) : filePath ? (
             <DocumentViewer ref={viewerRef} filePath={filePath} onTextSelected={setSelectedText} />
           ) : (
             <p style={{ color: '#666' }}>No document opened</p>
@@ -349,81 +406,36 @@ function App() {
         </div>
       </div>
 
-      {/* Chat 1 Pane (Middle - 25%) */}
-      <div className="chat-pane">
-        <div className="pane-header">Chat 1 (Summary & Global)</div>
-        <div className="pane-content" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          <p style={{ fontSize: '0.8rem', color: '#888' }}>Ask for summaries and global context here.</p>
-          {chat1Msgs.map((msg, i) => (
-            <div
-              key={i}
-              style={{
-                alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                background: msg.role === 'user' ? '#0e639c' : '#333',
-                padding: '8px',
-                borderRadius: '6px',
-                maxWidth: '90%',
-                fontSize: '0.9rem',
-                whiteSpace: 'pre-wrap',
-              }}
-            >
-              <strong>{msg.role}: </strong> {msg.content}
-            </div>
-          ))}
-          {isChat1Loading && <div style={{ fontSize: '0.8rem', color: '#888' }}>Thinking...</div>}
-        </div>
-        <div className="chat-input-container">
-          <input
-            type="text"
-            className="chat-input"
-            placeholder="Type a message and press Enter..."
-            value={chat1Input}
-            onChange={(e) => setChat1Input(e.target.value)}
-            onKeyDown={handleChat1Submit}
-            disabled={isChat1Loading}
-          />
-        </div>
-      </div>
+      <ChatPane
+        title="Chat 1 · 全局摘要"
+        hint="在这里询问文档的整体内容、摘要与结构。"
+        placeholder="输入问题,回车发送…"
+        msgs={chat1Msgs}
+        loading={isChat1Loading}
+        statusLine={provider === 'local' && isChat1Loading ? localStatus : undefined}
+        onSend={sendChat1}
+        onStop={stopChat1}
+        onClear={() => setChat1Msgs([])}
+      />
 
-      {/* Chat 2 Pane (Right - 25%) */}
-      <div className="chat-pane">
-        <div className="pane-header">Chat 2 (Detail & Details)</div>
-        <div className="pane-content" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          <p style={{ fontSize: '0.8rem', color: '#888' }}>
-            Ask detailed questions. Uses Chat 1 context and current text selection.
-          </p>
-          {chat2Msgs.map((msg, i) => (
-            <div
-              key={i}
-              style={{
-                alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                background: msg.role === 'user' ? '#0e639c' : '#333',
-                padding: '8px',
-                borderRadius: '6px',
-                maxWidth: '90%',
-                fontSize: '0.9rem',
-                whiteSpace: 'pre-wrap',
-              }}
-            >
-              <strong>{msg.role}: </strong> {msg.content}
-            </div>
-          ))}
-          {isChat2Loading && <div style={{ fontSize: '0.8rem', color: '#888' }}>Thinking...</div>}
-        </div>
-        <div className="chat-input-container">
-          <input
-            type="text"
-            className="chat-input"
-            placeholder="Ask about details and press Enter..."
-            value={chat2Input}
-            onChange={(e) => setChat2Input(e.target.value)}
-            onKeyDown={handleChat2Submit}
-            disabled={isChat2Loading}
-          />
-        </div>
-      </div>
+      <ChatPane
+        title="Chat 2 · 细节追问"
+        hint="针对细节深入追问;会携带 Chat 1 的上下文与当前选中文本。"
+        placeholder="追问细节,回车发送…"
+        msgs={chat2Msgs}
+        loading={isChat2Loading}
+        statusLine={provider === 'local' && isChat2Loading ? localStatus : undefined}
+        onSend={sendChat2}
+        onStop={stopChat2}
+        onClear={() => setChat2Msgs([])}
+      />
     </div>
   );
+
+  function handleProviderChange(p: Provider) {
+    setProvider(p);
+    setModel(DEFAULT_MODELS[p]);
+  }
 }
 
 export default App;
