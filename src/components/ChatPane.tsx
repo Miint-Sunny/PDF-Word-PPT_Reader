@@ -77,7 +77,7 @@ export function ChatPane({
     loading && msgs[lastIdx]?.role === 'assistant' && msgs[lastIdx].content === '';
 
   return (
-    <div className="chat-pane">
+    <div className="chat-pane-inner">
       <div className="pane-header">
         <span className="pane-title">{title}</span>
         <span className="pane-actions">

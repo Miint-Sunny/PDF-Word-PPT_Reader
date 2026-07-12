@@ -1,8 +1,10 @@
-import { useState, useEffect, useRef, CSSProperties } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import './index.css';
+import { FolderOpen, Image, Settings } from 'lucide-react';
 import { DocumentViewer } from './components/DocumentViewer';
 import type { DocumentViewerHandle } from './components/DocumentViewer';
 import { ChatPane } from './components/ChatPane';
+import { SettingsDrawer } from './components/SettingsDrawer';
 import { AIAgent, cancelLlm } from './lib/agent';
 import type { ChatMsg, Provider, ProviderConfig } from './lib/agent';
 import { secretGet, secretSet, secretDelete } from './lib/secrets';
@@ -30,8 +32,11 @@ const chatStorageKey = (fp: string | null) => `chats:${fp ?? 'none'}`;
 const stripForStorage = (ms: ChatMsg[]) =>
   ms.slice(-100).map(({ images: _images, ...rest }) => rest);
 
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
 function App() {
   const [filePath, setFilePath] = useState<string | null>(null);
+  const [docName, setDocName] = useState<string>('');
   const [docText, setDocText] = useState<string>('');
   const [docLoading, setDocLoading] = useState<string>('');
   const [selectedText, setSelectedText] = useState<string>('');
@@ -43,6 +48,14 @@ function App() {
 
   // Local (offline) model load/generation status.
   const [localStatus, setLocalStatus] = useState<string>('');
+
+  // Settings drawer & theme
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [theme, setTheme] = useState<string>(() => persisted('theme', 'dark'));
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem('theme', theme);
+  }, [theme]);
 
   // Provider configuration
   const [provider, setProvider] = useState<Provider>(
@@ -56,6 +69,11 @@ function App() {
   // Secrets (apiKey per provider, vertexSaJson) live in the OS keychain, loaded async below.
   const [apiKey, setApiKey] = useState<string>('');
   const [vertexSaJson, setVertexSaJson] = useState<string>('');
+
+  const handleProviderChange = (p: Provider) => {
+    setProvider(p);
+    setModel(DEFAULT_MODELS[p]);
+  };
 
   // Persist NON-secret config only. Keys/creds go to the keychain, never here.
   useEffect(() => {
@@ -102,6 +120,49 @@ function App() {
     if (vertexSaJson) secretSet('vertex_sa_json', vertexSaJson).catch(() => {});
     else secretDelete('vertex_sa_json').catch(() => {});
   };
+
+  // ---- Pane widths (draggable splitters) ---------------------------------
+  const [docPct, setDocPct] = useState<number>(() => Number(persisted('docPct', '50')));
+  const [chat1Pct, setChat1Pct] = useState<number>(() => Number(persisted('chat1Pct', '25')));
+  useEffect(() => {
+    localStorage.setItem('docPct', String(docPct));
+    localStorage.setItem('chat1Pct', String(chat1Pct));
+  }, [docPct, chat1Pct]);
+
+  const containerRef = useRef<HTMLDivElement>(null);
+  const dragInfo = useRef<{ which: 1 | 2; startX: number; d0: number; c0: number } | null>(null);
+  const [dragActive, setDragActive] = useState<0 | 1 | 2>(0);
+
+  const startDrag = (which: 1 | 2) => (e: React.MouseEvent) => {
+    dragInfo.current = { which, startX: e.clientX, d0: docPct, c0: chat1Pct };
+    setDragActive(which);
+    document.body.classList.add('no-select');
+  };
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const info = dragInfo.current;
+      const el = containerRef.current;
+      if (!info || !el) return;
+      const dx = ((e.clientX - info.startX) / el.clientWidth) * 100;
+      if (info.which === 1) {
+        setDocPct(clamp(info.d0 + dx, 25, 100 - info.c0 - 12));
+      } else {
+        setChat1Pct(clamp(info.c0 + dx, 12, 100 - info.d0 - 12));
+      }
+    };
+    const onUp = () => {
+      dragInfo.current = null;
+      setDragActive(0);
+      document.body.classList.remove('no-select');
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, []);
 
   // ---- Chat state (persisted per document) ------------------------------
   const [chat1Msgs, setChat1Msgs] = useState<ChatMsg[]>([]);
@@ -151,6 +212,7 @@ function App() {
       // Rust backend command to handle conversion for Office files
       const processedPath = await invoke<string>('convert_to_pdf_if_needed', { filePath: path });
       setFilePath(processedPath);
+      setDocName(path.split('/').pop() ?? path);
       setDocText('');
       setSelectedText('');
 
@@ -204,7 +266,8 @@ function App() {
 
     if (provider === 'vertex') {
       if (!vertexProject || !vertexLocation || !vertexSaJson) {
-        alert('Vertex 需要填写 GCP Project、Location 和服务账号 JSON。');
+        alert('Vertex 需要填写 GCP Project、Location 和服务账号 JSON(见右上角设置)。');
+        setDrawerOpen(true);
         return null;
       }
       const config: ProviderConfig = {
@@ -220,7 +283,8 @@ function App() {
     }
 
     if (!apiKey) {
-      alert(`请先填写 ${provider === 'openai' ? 'OpenAI' : 'Gemini'} API Key。`);
+      alert(`请先填写 ${provider === 'openai' ? 'OpenAI' : 'Gemini'} API Key(见右上角设置)。`);
+      setDrawerOpen(true);
       return null;
     }
     return new AIAgent({ provider, model, apiKey });
@@ -303,109 +367,37 @@ function App() {
     if (chat2Req.current) cancelLlm(chat2Req.current).catch(() => {});
   };
 
-  const inputStyle: CSSProperties = {
-    padding: '5px',
-    borderRadius: '3px',
-    border: '1px solid #555',
-    background: '#222',
-    color: 'white',
-  };
-
   return (
-    <div className="app-container">
-      {/* Document Pane (Left - 50%) */}
-      <div className="document-pane">
-        <div className="pane-header">Document Viewer</div>
-        <div className="toolbar" style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
-            <button onClick={handleOpenFile}>Open PDF/Word/PPT</button>
-
-            <select
-              value={provider}
-              onChange={(e) => handleProviderChange(e.target.value as Provider)}
-              style={inputStyle}
-              title="Model provider"
+    <div className="app-container" ref={containerRef}>
+      {/* Document Pane */}
+      <div className="document-pane" style={{ flexBasis: `${docPct}%`, flexGrow: 0, flexShrink: 0 }}>
+        <div className="toolbar">
+          <div className="toolbar-row">
+            <button onClick={handleOpenFile}>
+              <FolderOpen size={15} />
+              打开文档
+            </button>
+            {docName && <span className="doc-name" title={docName}>{docName}</span>}
+            <span className="toolbar-spacer" />
+            <span className="doc-name" title="当前模型(点击修改)" onClick={() => setDrawerOpen(true)} style={{ cursor: 'pointer' }}>
+              {provider} · {model}
+            </span>
+            <button
+              className={`icon-btn${visionEnabled ? ' on' : ''}`}
+              title="视觉:发送消息时附带当前页截图,供多模态模型识别图表(Gemini / gpt-4o)"
+              onClick={() => setVisionEnabled((v) => !v)}
+              disabled={!filePath}
             >
-              <option value="openai">OpenAI</option>
-              <option value="gemini">Gemini API</option>
-              <option value="vertex">Vertex AI</option>
-              <option value="local">Local (offline)</option>
-            </select>
-
-            <input
-              type="text"
-              placeholder="Model"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              style={{ ...inputStyle, width: '150px' }}
-              title="Model id"
-            />
-
-            {(provider === 'openai' || provider === 'gemini') && (
-              <input
-                type="password"
-                placeholder={provider === 'openai' ? 'OpenAI API Key' : 'Gemini API Key'}
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                onBlur={saveApiKey}
-                style={{ ...inputStyle, width: '200px' }}
-              />
-            )}
-
-            <label
-              style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', color: '#ccc' }}
-              title="Attach the current page as an image so vision-capable models (Gemini, gpt-4o) can see figures & charts"
-            >
-              <input
-                type="checkbox"
-                checked={visionEnabled}
-                onChange={(e) => setVisionEnabled(e.target.checked)}
-                disabled={!filePath}
-              />
-              🖼 Vision
-            </label>
+              <Image size={16} />
+            </button>
+            <button className="icon-btn" title="设置" onClick={() => setDrawerOpen(true)}>
+              <Settings size={16} />
+            </button>
           </div>
-
-          {provider === 'vertex' && (
-            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
-              <input
-                type="text"
-                placeholder="GCP Project ID"
-                value={vertexProject}
-                onChange={(e) => setVertexProject(e.target.value)}
-                style={{ ...inputStyle, width: '160px' }}
-              />
-              <input
-                type="text"
-                placeholder="Location (e.g. us-central1)"
-                value={vertexLocation}
-                onChange={(e) => setVertexLocation(e.target.value)}
-                style={{ ...inputStyle, width: '160px' }}
-              />
-              <input
-                type="password"
-                placeholder="Service Account JSON"
-                value={vertexSaJson}
-                onChange={(e) => setVertexSaJson(e.target.value)}
-                onBlur={saveVertexSaJson}
-                style={{ ...inputStyle, width: '220px' }}
-                title="Paste the full service-account JSON key (stored in the OS keychain)"
-              />
-            </div>
-          )}
-
-          {provider === 'local' && (
-            <div style={{ fontSize: '0.75rem', color: '#e0a94a' }}>
-              {localStatus
-                ? `Local model: ${localStatus}`
-                : 'Local (offline) model — first run downloads weights; small context & modest quality.'}
-            </div>
-          )}
-
           {selectedText && (
-            <div style={{ fontSize: '0.8rem', background: '#3c3c3c', padding: '5px', borderRadius: '4px' }}>
-              <strong>Selected:</strong>{' '}
-              {selectedText.length > 50 ? selectedText.substring(0, 50) + '...' : selectedText}
+            <div className="selected-chip" title={selectedText}>
+              <strong>已选中:</strong>{' '}
+              {selectedText.length > 80 ? selectedText.substring(0, 80) + '…' : selectedText}
             </div>
           )}
         </div>
@@ -415,42 +407,67 @@ function App() {
           ) : filePath ? (
             <DocumentViewer ref={viewerRef} filePath={filePath} onTextSelected={setSelectedText} />
           ) : (
-            <p className="doc-empty">未打开文档 — 点击上方按钮或将文件拖入窗口</p>
+            <p className="doc-empty">未打开文档 — 点击左上角按钮或将文件拖入窗口</p>
           )}
           {dragging && <div className="drop-overlay">松开以打开文档</div>}
         </div>
       </div>
 
-      <ChatPane
-        title="Chat 1 · 全局摘要"
-        hint="在这里询问文档的整体内容、摘要与结构。"
-        placeholder="输入问题,回车发送…"
-        msgs={chat1Msgs}
-        loading={isChat1Loading}
-        statusLine={provider === 'local' && isChat1Loading ? localStatus : undefined}
-        onSend={sendChat1}
-        onStop={stopChat1}
-        onClear={() => setChat1Msgs([])}
-      />
+      <div className={`splitter${dragActive === 1 ? ' active' : ''}`} onMouseDown={startDrag(1)} />
 
-      <ChatPane
-        title="Chat 2 · 细节追问"
-        hint="针对细节深入追问;会携带 Chat 1 的上下文与当前选中文本。"
-        placeholder="追问细节,回车发送…"
-        msgs={chat2Msgs}
-        loading={isChat2Loading}
-        statusLine={provider === 'local' && isChat2Loading ? localStatus : undefined}
-        onSend={sendChat2}
-        onStop={stopChat2}
-        onClear={() => setChat2Msgs([])}
+      <div className="chat-pane" style={{ flexBasis: `${chat1Pct}%`, flexGrow: 0, flexShrink: 0 }}>
+        <ChatPane
+          title="Chat 1 · 全局摘要"
+          hint="在这里询问文档的整体内容、摘要与结构。"
+          placeholder="输入问题,回车发送…"
+          msgs={chat1Msgs}
+          loading={isChat1Loading}
+          statusLine={provider === 'local' && isChat1Loading ? localStatus : undefined}
+          onSend={sendChat1}
+          onStop={stopChat1}
+          onClear={() => setChat1Msgs([])}
+        />
+      </div>
+
+      <div className={`splitter${dragActive === 2 ? ' active' : ''}`} onMouseDown={startDrag(2)} />
+
+      <div className="chat-pane" style={{ flex: 1 }}>
+        <ChatPane
+          title="Chat 2 · 细节追问"
+          hint="针对细节深入追问;会携带 Chat 1 的上下文与当前选中文本。"
+          placeholder="追问细节,回车发送…"
+          msgs={chat2Msgs}
+          loading={isChat2Loading}
+          statusLine={provider === 'local' && isChat2Loading ? localStatus : undefined}
+          onSend={sendChat2}
+          onStop={stopChat2}
+          onClear={() => setChat2Msgs([])}
+        />
+      </div>
+
+      <SettingsDrawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        provider={provider}
+        onProviderChange={handleProviderChange}
+        model={model}
+        setModel={setModel}
+        apiKey={apiKey}
+        setApiKey={setApiKey}
+        onApiKeyBlur={saveApiKey}
+        vertexProject={vertexProject}
+        setVertexProject={setVertexProject}
+        vertexLocation={vertexLocation}
+        setVertexLocation={setVertexLocation}
+        vertexSaJson={vertexSaJson}
+        setVertexSaJson={setVertexSaJson}
+        onVertexSaJsonBlur={saveVertexSaJson}
+        theme={theme}
+        setTheme={setTheme}
+        localStatus={localStatus}
       />
     </div>
   );
-
-  function handleProviderChange(p: Provider) {
-    setProvider(p);
-    setModel(DEFAULT_MODELS[p]);
-  }
 }
 
 export default App;
