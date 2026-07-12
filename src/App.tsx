@@ -4,6 +4,7 @@ import { DocumentViewer } from './components/DocumentViewer';
 import type { DocumentViewerHandle } from './components/DocumentViewer';
 import { AIAgent } from './lib/agent';
 import type { ChatMsg, Provider, ProviderConfig } from './lib/agent';
+import { secretGet, secretSet, secretDelete } from './lib/secrets';
 import { extractTextFromPDF } from './lib/pdf';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
@@ -39,22 +40,59 @@ function App() {
     () => (persisted('provider', 'openai') as Provider)
   );
   const [model, setModel] = useState<string>(() => persisted('model', DEFAULT_MODELS.openai));
-  const [apiKey, setApiKey] = useState<string>(() => persisted('apiKey', ''));
   const [vertexProject, setVertexProject] = useState<string>(() => persisted('vertexProject', ''));
   const [vertexLocation, setVertexLocation] = useState<string>(
     () => persisted('vertexLocation', 'us-central1')
   );
-  const [vertexSaJson, setVertexSaJson] = useState<string>(() => persisted('vertexSaJson', ''));
+  // Secrets (apiKey per provider, vertexSaJson) live in the OS keychain, loaded async below.
+  const [apiKey, setApiKey] = useState<string>('');
+  const [vertexSaJson, setVertexSaJson] = useState<string>('');
 
-  // Persist config
+  // Persist NON-secret config only. Keys/creds go to the keychain, never here.
   useEffect(() => {
     localStorage.setItem('provider', provider);
     localStorage.setItem('model', model);
-    localStorage.setItem('apiKey', apiKey);
     localStorage.setItem('vertexProject', vertexProject);
     localStorage.setItem('vertexLocation', vertexLocation);
-    localStorage.setItem('vertexSaJson', vertexSaJson);
-  }, [provider, model, apiKey, vertexProject, vertexLocation, vertexSaJson]);
+  }, [provider, model, vertexProject, vertexLocation]);
+
+  // One-time migration: purge any secrets previously stored in localStorage plaintext.
+  useEffect(() => {
+    for (const stale of ['apiKey', 'vertexSaJson']) localStorage.removeItem(stale);
+  }, []);
+
+  // Load the current provider's API key from the keychain (openai/gemini).
+  useEffect(() => {
+    if (provider !== 'openai' && provider !== 'gemini') return;
+    let cancelled = false;
+    secretGet(`api_key_${provider}`)
+      .then((v) => {
+        if (!cancelled) setApiKey(v ?? '');
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [provider]);
+
+  // Load the Vertex service-account JSON from the keychain once.
+  useEffect(() => {
+    secretGet('vertex_sa_json')
+      .then((v) => setVertexSaJson(v ?? ''))
+      .catch(() => {});
+  }, []);
+
+  // Save helpers (called on blur to avoid keychain churn on every keystroke).
+  const saveApiKey = () => {
+    if (provider !== 'openai' && provider !== 'gemini') return;
+    const k = `api_key_${provider}`;
+    if (apiKey) secretSet(k, apiKey).catch(() => {});
+    else secretDelete(k).catch(() => {});
+  };
+  const saveVertexSaJson = () => {
+    if (vertexSaJson) secretSet('vertex_sa_json', vertexSaJson).catch(() => {});
+    else secretDelete('vertex_sa_json').catch(() => {});
+  };
 
   const [chat1Msgs, setChat1Msgs] = useState<ChatMsg[]>([]);
   const [chat1Input, setChat1Input] = useState('');
@@ -232,6 +270,7 @@ function App() {
                 placeholder={provider === 'openai' ? 'OpenAI API Key' : 'Gemini API Key'}
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
+                onBlur={saveApiKey}
                 style={{ ...inputStyle, width: '200px' }}
               />
             )}
@@ -271,8 +310,9 @@ function App() {
                 placeholder="Service Account JSON"
                 value={vertexSaJson}
                 onChange={(e) => setVertexSaJson(e.target.value)}
+                onBlur={saveVertexSaJson}
                 style={{ ...inputStyle, width: '220px' }}
-                title="Paste the full service-account JSON key"
+                title="Paste the full service-account JSON key (stored in the OS keychain)"
               />
             </div>
           )}

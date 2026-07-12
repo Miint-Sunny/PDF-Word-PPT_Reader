@@ -35,11 +35,12 @@
 
 ## 🚀 未完成的任务 (TODOs)
 
-- [x] **多模型云端 Agent（本轮完成）**: OpenAI 占位接口已替换为 Rust 后端 `llm_chat`，支持 OpenAI / Gemini / Vertex。
-- [x] **跨平台适配（本轮完成）**: macOS 已支持 LibreOffice / Office / iWork 转换回退链；Windows COM 路径保留。
-- [ ] **集成 Transformers.js (本地模型)**: 利用 `@xenova/transformers` 在端侧加载量化模型，作为纯离线 provider 接入 `agent.ts` 的 provider 抽象。
-- [ ] **Vision API (视觉分析)**: 后端消息结构已预留 base64 图片入参（`ImagePart`），只需在前端把 PPT 图片/图表提取并随消息发出，即可用 Gemini 原生多模态识别。
-- [ ] **打磨**: 密钥目前存于 `localStorage`（Vertex 服务账号 JSON 尤其敏感），建议迁移到更安全的存储；`DocumentViewer` 一次性渲染全部页，生产可改虚拟滚动。
+- [x] **多模型云端 Agent（已完成）**: OpenAI 占位接口已替换为 Rust 后端 `llm_chat`，支持 OpenAI / Gemini / Vertex。
+- [x] **跨平台适配（已完成）**: macOS 已支持 LibreOffice / Office / iWork 转换回退链；Windows COM 路径保留。
+- [x] **端侧本地模型（已完成）**: `local` provider 用 `@xenova/transformers` 在 WebView 内离线推理（懒加载、代码分割）。默认 `Xenova/Qwen1.5-0.5B-Chat`；小模型上下文窗口有限，定位为离线/隐私回退。
+- [x] **Vision 视觉分析（已完成）**: 工具栏「🖼 Vision」开关会把当前可见页截图（base64 PNG）随消息发给多模态模型（Gemini / gpt-4o）识别图表。
+- [x] **密钥安全（已完成）**: API Key 与 Vertex 服务账号 JSON 改存 **操作系统钥匙串**（Rust `keyring`），localStorage 只留非敏感配置。
+- [ ] **进一步打磨**: `DocumentViewer` 一次性渲染全部页，生产可改虚拟滚动；本地模型的 ONNX runtime WASM 与权重目前首次运行需联网拉取，若要真正纯离线可考虑随包内置。
 
 ## 📦 环境要求与运行指南
 

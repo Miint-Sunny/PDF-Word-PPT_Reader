@@ -651,6 +651,37 @@ async fn mint_vertex_token(sa_json: &str) -> Result<String, String> {
         .ok_or_else(|| format!("No access_token in token response: {}", text))
 }
 
+// ===========================================================================
+// OS keychain: keep API keys / Vertex service-account JSON in the native
+// credential store instead of plaintext localStorage.
+// ===========================================================================
+const KEYRING_SERVICE: &str = "ai-document-reader";
+
+#[tauri::command]
+fn secret_set(key: String, value: String) -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, &key).map_err(|e| e.to_string())?;
+    entry.set_password(&value).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn secret_get(key: String) -> Result<Option<String>, String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, &key).map_err(|e| e.to_string())?;
+    match entry.get_password() {
+        Ok(v) => Ok(Some(v)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+fn secret_delete(key: String) -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, &key).map_err(|e| e.to_string())?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -659,7 +690,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             read_file_buffer,
             convert_to_pdf_if_needed,
-            llm_chat
+            llm_chat,
+            secret_set,
+            secret_get,
+            secret_delete
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
