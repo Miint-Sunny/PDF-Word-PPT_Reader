@@ -1,9 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
+import type { ProgressFn } from './local';
 
 // Supported model providers. "Antigravity" is intentionally absent — it has no
 // embeddable third-party API (it is an agentic IDE / the CORS-blocked
 // Interactions API), so Google Cloud is served by Gemini API + Vertex AI.
-export type Provider = 'openai' | 'gemini' | 'vertex';
+// "local" runs fully offline in the WebView via Transformers.js.
+export type Provider = 'openai' | 'gemini' | 'vertex' | 'local';
 
 // Optional multimodal image part (base64, no data: prefix). Wired through the
 // backend so Gemini's native vision can later analyze PPT images/charts.
@@ -31,6 +33,7 @@ export interface ProviderConfig {
   apiKey?: string; // openai / gemini
   baseUrl?: string; // optional OpenAI-compatible endpoint override
   vertex?: VertexCreds; // vertex only
+  onProgress?: ProgressFn; // local provider: model load / generation status
 }
 
 // Mirrors the Rust `LlmRequest` (camelCase) consumed by the `llm_chat` command.
@@ -57,6 +60,13 @@ export class AIAgent {
   // All network calls happen in Rust (bypasses WebView CORS + keeps keys/creds
   // out of the JS bundle). This just marshals the request.
   private async chat(system: string, messages: ChatMsg[]): Promise<string> {
+    // Local provider runs in-WebView via Transformers.js (lazily imported so
+    // the ~heavy dependency is never bundled unless the user picks "local").
+    if (this.config.provider === 'local') {
+      const { localChat } = await import('./local');
+      return localChat(this.config.model, system, messages, this.config.onProgress);
+    }
+
     const req: LlmRequest = {
       provider: this.config.provider,
       model: this.config.model,

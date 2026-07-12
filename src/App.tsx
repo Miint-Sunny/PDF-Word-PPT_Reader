@@ -12,6 +12,7 @@ const DEFAULT_MODELS: Record<Provider, string> = {
   openai: 'gpt-4o-mini',
   gemini: 'gemini-2.5-flash',
   vertex: 'gemini-2.5-flash',
+  local: 'Xenova/Qwen1.5-0.5B-Chat',
 };
 
 // Small helper for persisted string state (keys/config survive restarts).
@@ -29,6 +30,9 @@ function App() {
   // messages so multimodal models (Gemini, gpt-4o) can see figures/charts.
   const viewerRef = useRef<DocumentViewerHandle>(null);
   const [visionEnabled, setVisionEnabled] = useState<boolean>(false);
+
+  // Local (offline) model load/generation status.
+  const [localStatus, setLocalStatus] = useState<string>('');
 
   // Provider configuration
   const [provider, setProvider] = useState<Provider>(
@@ -99,6 +103,11 @@ function App() {
   };
 
   const getAgent = (): AIAgent | null => {
+    if (provider === 'local') {
+      // Offline, in-WebView model — no credentials needed.
+      return new AIAgent({ provider, model, onProgress: setLocalStatus });
+    }
+
     if (provider === 'vertex') {
       if (!vertexProject || !vertexLocation || !vertexSaJson) {
         alert('Vertex requires a project, location, and service account JSON.');
@@ -205,6 +214,7 @@ function App() {
               <option value="openai">OpenAI</option>
               <option value="gemini">Gemini API</option>
               <option value="vertex">Vertex AI</option>
+              <option value="local">Local (offline)</option>
             </select>
 
             <input
@@ -216,7 +226,7 @@ function App() {
               title="Model id"
             />
 
-            {provider !== 'vertex' && (
+            {(provider === 'openai' || provider === 'gemini') && (
               <input
                 type="password"
                 placeholder={provider === 'openai' ? 'OpenAI API Key' : 'Gemini API Key'}
@@ -264,6 +274,14 @@ function App() {
                 style={{ ...inputStyle, width: '220px' }}
                 title="Paste the full service-account JSON key"
               />
+            </div>
+          )}
+
+          {provider === 'local' && (
+            <div style={{ fontSize: '0.75rem', color: '#e0a94a' }}>
+              {localStatus
+                ? `Local model: ${localStatus}`
+                : 'Local (offline) model — first run downloads weights; small context & modest quality.'}
             </div>
           )}
 
