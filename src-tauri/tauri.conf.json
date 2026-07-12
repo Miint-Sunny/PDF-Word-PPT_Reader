@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "temp-tauri",
+  "productName": "AI Document Reader",
   "version": "0.1.0",
-  "identifier": "com.shu-yan.temp-tauri",
+  "identifier": "com.miint-sunny.ai-document-reader",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,9 +12,9 @@
   "app": {
     "windows": [
       {
-        "title": "temp-tauri",
-        "width": 800,
-        "height": 600
+        "title": "AI Document Reader",
+        "width": 1280,
+        "height": 800
       }
     ],
     "security": {

@@ -1,90 +1,116 @@
-import { ChatOpenAI } from "@langchain/openai";
-import { HumanMessage, SystemMessage, AIMessage } from "@langchain/core/messages";
+import { invoke } from '@tauri-apps/api/core';
 
-// Configuration interface
-export interface AgentConfig {
-  apiKey: string;
-  baseUrl?: string;
-  model: string;
+// Supported model providers. "Antigravity" is intentionally absent — it has no
+// embeddable third-party API (it is an agentic IDE / the CORS-blocked
+// Interactions API), so Google Cloud is served by Gemini API + Vertex AI.
+export type Provider = 'openai' | 'gemini' | 'vertex';
+
+// Optional multimodal image part (base64, no data: prefix). Wired through the
+// backend so Gemini's native vision can later analyze PPT images/charts.
+export interface ImagePart {
+  mimeType: string;
+  data: string;
 }
 
 // Message type for our UI
 export interface ChatMsg {
   role: 'user' | 'assistant' | 'system';
   content: string;
+  images?: ImagePart[];
 }
 
+export interface VertexCreds {
+  project: string;
+  location: string;
+  serviceAccountJson: string;
+}
+
+export interface ProviderConfig {
+  provider: Provider;
+  model: string;
+  apiKey?: string; // openai / gemini
+  baseUrl?: string; // optional OpenAI-compatible endpoint override
+  vertex?: VertexCreds; // vertex only
+}
+
+// Mirrors the Rust `LlmRequest` (camelCase) consumed by the `llm_chat` command.
+interface LlmRequest {
+  provider: Provider;
+  model: string;
+  system: string;
+  messages: ChatMsg[];
+  apiKey?: string;
+  baseUrl?: string;
+  vertex?: VertexCreds;
+}
+
+// Truncate document context to keep token costs bounded.
+const DOC_CONTEXT_LIMIT = 50000;
+
 export class AIAgent {
-  private llm: ChatOpenAI;
+  private config: ProviderConfig;
 
-  constructor(config: AgentConfig) {
-    this.llm = new ChatOpenAI({
-      openAIApiKey: config.apiKey,
-      configuration: {
-        baseURL: config.baseUrl,
-      },
-      modelName: config.model,
-      temperature: 0.2, // Keep it objective and analytical based on persona
-    });
+  constructor(config: ProviderConfig) {
+    this.config = config;
   }
 
-  // Convert generic messages to LangChain messages
-  private convertMessages(messages: ChatMsg[]) {
-    return messages.map(m => {
-      if (m.role === 'user') return new HumanMessage(m.content);
-      if (m.role === 'system') return new SystemMessage(m.content);
-      return new AIMessage(m.content);
-    });
+  // All network calls happen in Rust (bypasses WebView CORS + keeps keys/creds
+  // out of the JS bundle). This just marshals the request.
+  private async chat(system: string, messages: ChatMsg[]): Promise<string> {
+    const req: LlmRequest = {
+      provider: this.config.provider,
+      model: this.config.model,
+      system,
+      messages,
+      apiKey: this.config.apiKey,
+      baseUrl: this.config.baseUrl,
+      vertex: this.config.vertex,
+    };
+    return await invoke<string>('llm_chat', { req });
   }
 
-  // Ask Chat 1 (Summary/Global context)
+  // Chat 1 — summary / global context.
   async askGlobalContext(messages: ChatMsg[], documentText: string): Promise<string> {
-    const systemPrompt = `You are a rigorous, objective, professional, and reliable document assistant. 
+    const system = `You are a rigorous, objective, professional, and reliable document assistant.
 Your core task is to provide correct conclusions, clear logic, verifiable evidence, complete analysis, and executable plans.
 Do not use emotional language, emojis, or meaningless praise.
 
 DOCUMENT CONTEXT:
 ---
-${documentText.substring(0, 50000)} // Truncating to avoid massive token costs initially
+${documentText.substring(0, DOC_CONTEXT_LIMIT)}
 ---
 
 Answer the user's questions based primarily on the document context provided above.`;
 
-    const langMessages = [
-      new SystemMessage(systemPrompt),
-      ...this.convertMessages(messages)
-    ];
-
-    const res = await this.llm.invoke(langMessages);
-    return res.content as string;
+    return this.chat(system, messages);
   }
 
-  // Ask Chat 2 (Detailed question, inherits Chat 1 context)
-  async askDetail(chat1Messages: ChatMsg[], chat2Messages: ChatMsg[], documentText: string, selectedText: string = ""): Promise<string> {
-    
-    let contextStr = `DOCUMENT CONTEXT:\n---\n${documentText.substring(0, 50000)}\n---\n`;
+  // Chat 2 — detailed follow-up; inherits Chat 1 history + the current selection.
+  async askDetail(
+    chat1Messages: ChatMsg[],
+    chat2Messages: ChatMsg[],
+    documentText: string,
+    selectedText: string = ''
+  ): Promise<string> {
+    let contextStr = `DOCUMENT CONTEXT:\n---\n${documentText.substring(0, DOC_CONTEXT_LIMIT)}\n---\n`;
     if (selectedText) {
       contextStr += `\nUSER SELECTED TEXT FROM DOCUMENT:\n---\n${selectedText}\n---\nFocus your analysis specifically on this selection.\n`;
     }
 
-    const systemPrompt = `You are a rigorous and professional document analysis assistant.
+    const chat1ContextStr = chat1Messages
+      .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+      .join('\n\n');
+
+    const system = `You are a rigorous and professional document analysis assistant.
 You are engaged in a detailed follow-up conversation. You have access to the global summary conversation history (Chat 1) and the current document.
 
 ${contextStr}
 
-Maintain your analytical and objective persona.`;
+Maintain your analytical and objective persona.
 
-    // Flatten chat 1 as context for chat 2, but clearly mark it
-    const chat1ContextStr = chat1Messages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
-    
-    const augmentedChat2Messages: ChatMsg[] = [
-      { role: 'system', content: `${systemPrompt}\n\nPREVIOUS GLOBAL CONVERSATION HISTORY:\n${chat1ContextStr}` },
-      ...chat2Messages
-    ];
+PREVIOUS GLOBAL CONVERSATION HISTORY (Chat 1):
+${chat1ContextStr}`;
 
-    const langMessages = this.convertMessages(augmentedChat2Messages);
-    
-    const res = await this.llm.invoke(langMessages);
-    return res.content as string;
+    return this.chat(system, chat2Messages);
   }
 }

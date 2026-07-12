@@ -79,6 +79,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({ filePath, onText
           const renderContext = {
             canvasContext: context,
             viewport: viewport,
+            canvas: canvas,
           };
 
           await page.render(renderContext).promise;

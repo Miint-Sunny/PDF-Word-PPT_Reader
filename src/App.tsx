@@ -1,18 +1,51 @@
-import React, { useState, KeyboardEvent } from 'react';
+import { useState, useEffect, KeyboardEvent, CSSProperties } from 'react';
 import './index.css';
 import { DocumentViewer } from './components/DocumentViewer';
 import { AIAgent } from './lib/agent';
-import type { ChatMsg } from './lib/agent';
+import type { ChatMsg, Provider, ProviderConfig } from './lib/agent';
 import { extractTextFromPDF } from './lib/pdf';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 
+const DEFAULT_MODELS: Record<Provider, string> = {
+  openai: 'gpt-4o-mini',
+  gemini: 'gemini-2.5-flash',
+  vertex: 'gemini-2.5-flash',
+};
+
+// Small helper for persisted string state (keys/config survive restarts).
+// NOTE: localStorage is convenient but not a secure vault — the Vertex service
+// account JSON in particular is sensitive. Fine for a local MVP; revisit later.
+const persisted = (key: string, fallback: string) =>
+  localStorage.getItem(key) ?? fallback;
+
 function App() {
   const [filePath, setFilePath] = useState<string | null>(null);
-  const [apiKey, setApiKey] = useState<string>('');
   const [docText, setDocText] = useState<string>('');
   const [selectedText, setSelectedText] = useState<string>('');
-  
+
+  // Provider configuration
+  const [provider, setProvider] = useState<Provider>(
+    () => (persisted('provider', 'openai') as Provider)
+  );
+  const [model, setModel] = useState<string>(() => persisted('model', DEFAULT_MODELS.openai));
+  const [apiKey, setApiKey] = useState<string>(() => persisted('apiKey', ''));
+  const [vertexProject, setVertexProject] = useState<string>(() => persisted('vertexProject', ''));
+  const [vertexLocation, setVertexLocation] = useState<string>(
+    () => persisted('vertexLocation', 'us-central1')
+  );
+  const [vertexSaJson, setVertexSaJson] = useState<string>(() => persisted('vertexSaJson', ''));
+
+  // Persist config
+  useEffect(() => {
+    localStorage.setItem('provider', provider);
+    localStorage.setItem('model', model);
+    localStorage.setItem('apiKey', apiKey);
+    localStorage.setItem('vertexProject', vertexProject);
+    localStorage.setItem('vertexLocation', vertexLocation);
+    localStorage.setItem('vertexSaJson', vertexSaJson);
+  }, [provider, model, apiKey, vertexProject, vertexLocation, vertexSaJson]);
+
   const [chat1Msgs, setChat1Msgs] = useState<ChatMsg[]>([]);
   const [chat1Input, setChat1Input] = useState('');
   const [isChat1Loading, setIsChat1Loading] = useState(false);
@@ -21,27 +54,36 @@ function App() {
   const [chat2Input, setChat2Input] = useState('');
   const [isChat2Loading, setIsChat2Loading] = useState(false);
 
+  const handleProviderChange = (p: Provider) => {
+    setProvider(p);
+    setModel(DEFAULT_MODELS[p]);
+  };
+
   const handleOpenFile = async () => {
     try {
       const selected = await open({
         multiple: false,
-        filters: [{ name: 'Documents', extensions: ['pdf', 'docx', 'pptx', 'doc', 'ppt'] }]
+        filters: [{ name: 'Documents', extensions: ['pdf', 'docx', 'pptx', 'doc', 'ppt'] }],
       });
 
       if (selected && typeof selected === 'string') {
         // Rust backend command to handle conversion for Office files
-        const processedPath = await invoke<string>('convert_to_pdf_if_needed', { filePath: selected });
-        
+        const processedPath = await invoke<string>('convert_to_pdf_if_needed', {
+          filePath: selected,
+        });
+
         setFilePath(processedPath);
         setDocText('');
-        
+
         // Read the file as a byte array
-        const bufferArray = await invoke<number[]>('read_file_buffer', { filePath: processedPath });
+        const bufferArray = await invoke<number[]>('read_file_buffer', {
+          filePath: processedPath,
+        });
         const buffer = new Uint8Array(bufferArray);
-        
+
         if (buffer) {
-           const text = await extractTextFromPDF(buffer);
-           setDocText(text);
+          const text = await extractTextFromPDF(buffer);
+          setDocText(text);
         }
       }
     } catch (err: any) {
@@ -50,12 +92,29 @@ function App() {
     }
   };
 
-  const getAgent = () => {
+  const getAgent = (): AIAgent | null => {
+    if (provider === 'vertex') {
+      if (!vertexProject || !vertexLocation || !vertexSaJson) {
+        alert('Vertex requires a project, location, and service account JSON.');
+        return null;
+      }
+      const config: ProviderConfig = {
+        provider,
+        model,
+        vertex: {
+          project: vertexProject,
+          location: vertexLocation,
+          serviceAccountJson: vertexSaJson,
+        },
+      };
+      return new AIAgent(config);
+    }
+
     if (!apiKey) {
-      alert("Please enter an OpenAI API Key first.");
+      alert(`Please enter your ${provider === 'openai' ? 'OpenAI' : 'Gemini'} API key first.`);
       return null;
     }
-    return new AIAgent({ apiKey, model: 'gpt-4o-mini' });
+    return new AIAgent({ provider, model, apiKey });
   };
 
   const handleChat1Submit = async (e: KeyboardEvent<HTMLInputElement>) => {
@@ -72,7 +131,7 @@ function App() {
         const reply = await agent.askGlobalContext(newMsgs, docText);
         setChat1Msgs([...newMsgs, { role: 'assistant', content: reply }]);
       } catch (err: any) {
-        setChat1Msgs([...newMsgs, { role: 'system', content: `Error: ${err.message}` }]);
+        setChat1Msgs([...newMsgs, { role: 'system', content: `Error: ${err.message || err}` }]);
       } finally {
         setIsChat1Loading(false);
       }
@@ -84,8 +143,8 @@ function App() {
       const agent = getAgent();
       if (!agent) return;
 
-      const prompt = selectedText 
-        ? `Regarding the selected text: "${selectedText}"\n\n${chat2Input}` 
+      const prompt = selectedText
+        ? `Regarding the selected text: "${selectedText}"\n\n${chat2Input}`
         : chat2Input;
 
       const newMsgs: ChatMsg[] = [...chat2Msgs, { role: 'user', content: prompt }];
@@ -97,11 +156,19 @@ function App() {
         const reply = await agent.askDetail(chat1Msgs, newMsgs, docText, selectedText);
         setChat2Msgs([...newMsgs, { role: 'assistant', content: reply }]);
       } catch (err: any) {
-        setChat2Msgs([...newMsgs, { role: 'system', content: `Error: ${err.message}` }]);
+        setChat2Msgs([...newMsgs, { role: 'system', content: `Error: ${err.message || err}` }]);
       } finally {
         setIsChat2Loading(false);
       }
     }
+  };
+
+  const inputStyle: CSSProperties = {
+    padding: '5px',
+    borderRadius: '3px',
+    border: '1px solid #555',
+    background: '#222',
+    color: 'white',
   };
 
   return (
@@ -109,24 +176,84 @@ function App() {
       {/* Document Pane (Left - 50%) */}
       <div className="document-pane">
         <div className="pane-header">Document Viewer</div>
-        <div className="toolbar" style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-          <div style={{ display: 'flex', gap: '10px' }}>
+        <div className="toolbar" style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
             <button onClick={handleOpenFile}>Open PDF/Word/PPT</button>
-            <input 
-              type="password" 
-              placeholder="OpenAI API Key" 
-              value={apiKey} 
-              onChange={e => setApiKey(e.target.value)}
-              style={{ padding: '5px', borderRadius: '3px', border: '1px solid #555', background: '#222', color: 'white' }}
+
+            <select
+              value={provider}
+              onChange={(e) => handleProviderChange(e.target.value as Provider)}
+              style={inputStyle}
+              title="Model provider"
+            >
+              <option value="openai">OpenAI</option>
+              <option value="gemini">Gemini API</option>
+              <option value="vertex">Vertex AI</option>
+            </select>
+
+            <input
+              type="text"
+              placeholder="Model"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              style={{ ...inputStyle, width: '150px' }}
+              title="Model id"
             />
+
+            {provider !== 'vertex' && (
+              <input
+                type="password"
+                placeholder={provider === 'openai' ? 'OpenAI API Key' : 'Gemini API Key'}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                style={{ ...inputStyle, width: '200px' }}
+              />
+            )}
           </div>
+
+          {provider === 'vertex' && (
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+              <input
+                type="text"
+                placeholder="GCP Project ID"
+                value={vertexProject}
+                onChange={(e) => setVertexProject(e.target.value)}
+                style={{ ...inputStyle, width: '160px' }}
+              />
+              <input
+                type="text"
+                placeholder="Location (e.g. us-central1)"
+                value={vertexLocation}
+                onChange={(e) => setVertexLocation(e.target.value)}
+                style={{ ...inputStyle, width: '160px' }}
+              />
+              <input
+                type="password"
+                placeholder="Service Account JSON"
+                value={vertexSaJson}
+                onChange={(e) => setVertexSaJson(e.target.value)}
+                style={{ ...inputStyle, width: '220px' }}
+                title="Paste the full service-account JSON key"
+              />
+            </div>
+          )}
+
           {selectedText && (
             <div style={{ fontSize: '0.8rem', background: '#3c3c3c', padding: '5px', borderRadius: '4px' }}>
-              <strong>Selected:</strong> {selectedText.length > 50 ? selectedText.substring(0, 50) + '...' : selectedText}
+              <strong>Selected:</strong>{' '}
+              {selectedText.length > 50 ? selectedText.substring(0, 50) + '...' : selectedText}
             </div>
           )}
         </div>
-        <div className="pane-content" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: filePath ? 'flex-start' : 'center' }}>
+        <div
+          className="pane-content"
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: filePath ? 'flex-start' : 'center',
+          }}
+        >
           {filePath ? (
             <DocumentViewer filePath={filePath} onTextSelected={setSelectedText} />
           ) : (
@@ -141,23 +268,30 @@ function App() {
         <div className="pane-content" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
           <p style={{ fontSize: '0.8rem', color: '#888' }}>Ask for summaries and global context here.</p>
           {chat1Msgs.map((msg, i) => (
-             <div key={i} style={{ 
-               alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
-               background: msg.role === 'user' ? '#0e639c' : '#333',
-               padding: '8px', borderRadius: '6px', maxWidth: '90%', fontSize: '0.9rem'
-             }}>
-               <strong>{msg.role}: </strong> {msg.content}
-             </div>
+            <div
+              key={i}
+              style={{
+                alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                background: msg.role === 'user' ? '#0e639c' : '#333',
+                padding: '8px',
+                borderRadius: '6px',
+                maxWidth: '90%',
+                fontSize: '0.9rem',
+                whiteSpace: 'pre-wrap',
+              }}
+            >
+              <strong>{msg.role}: </strong> {msg.content}
+            </div>
           ))}
           {isChat1Loading && <div style={{ fontSize: '0.8rem', color: '#888' }}>Thinking...</div>}
         </div>
         <div className="chat-input-container">
-          <input 
-            type="text" 
-            className="chat-input" 
-            placeholder="Type a message and press Enter..." 
+          <input
+            type="text"
+            className="chat-input"
+            placeholder="Type a message and press Enter..."
             value={chat1Input}
-            onChange={e => setChat1Input(e.target.value)}
+            onChange={(e) => setChat1Input(e.target.value)}
             onKeyDown={handleChat1Submit}
             disabled={isChat1Loading}
           />
@@ -168,25 +302,34 @@ function App() {
       <div className="chat-pane">
         <div className="pane-header">Chat 2 (Detail & Details)</div>
         <div className="pane-content" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          <p style={{ fontSize: '0.8rem', color: '#888' }}>Ask detailed questions. Uses Chat 1 context and current text selection.</p>
+          <p style={{ fontSize: '0.8rem', color: '#888' }}>
+            Ask detailed questions. Uses Chat 1 context and current text selection.
+          </p>
           {chat2Msgs.map((msg, i) => (
-             <div key={i} style={{ 
-               alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
-               background: msg.role === 'user' ? '#0e639c' : '#333',
-               padding: '8px', borderRadius: '6px', maxWidth: '90%', fontSize: '0.9rem'
-             }}>
-               <strong>{msg.role}: </strong> {msg.content}
-             </div>
+            <div
+              key={i}
+              style={{
+                alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                background: msg.role === 'user' ? '#0e639c' : '#333',
+                padding: '8px',
+                borderRadius: '6px',
+                maxWidth: '90%',
+                fontSize: '0.9rem',
+                whiteSpace: 'pre-wrap',
+              }}
+            >
+              <strong>{msg.role}: </strong> {msg.content}
+            </div>
           ))}
           {isChat2Loading && <div style={{ fontSize: '0.8rem', color: '#888' }}>Thinking...</div>}
         </div>
         <div className="chat-input-container">
-          <input 
-            type="text" 
-            className="chat-input" 
-            placeholder="Ask about details and press Enter..." 
+          <input
+            type="text"
+            className="chat-input"
+            placeholder="Ask about details and press Enter..."
             value={chat2Input}
-            onChange={e => setChat2Input(e.target.value)}
+            onChange={(e) => setChat2Input(e.target.value)}
             onKeyDown={handleChat2Submit}
             disabled={isChat2Loading}
           />
