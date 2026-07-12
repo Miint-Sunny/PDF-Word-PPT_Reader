@@ -9,6 +9,9 @@ import { secretGet, secretSet, secretDelete } from './lib/secrets';
 import { extractTextFromPDF } from './lib/pdf';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
+
+const OPENABLE = /\.(pdf|docx?|pptx?)$/i;
 
 const DEFAULT_MODELS: Record<Provider, string> = {
   openai: 'gpt-4o-mini',
@@ -172,6 +175,25 @@ function App() {
       await openPath(selected);
     }
   };
+
+  // Drag & drop a document anywhere onto the window to open it.
+  const [dragging, setDragging] = useState(false);
+  const openPathRef = useRef(openPath);
+  openPathRef.current = openPath;
+  useEffect(() => {
+    const unlistenPromise = getCurrentWebview().onDragDropEvent((event) => {
+      const t = event.payload.type;
+      if (t === 'enter' || t === 'over') setDragging(true);
+      else setDragging(false);
+      if (t === 'drop') {
+        const path = event.payload.paths.find((p) => OPENABLE.test(p));
+        if (path) void openPathRef.current(path);
+      }
+    });
+    return () => {
+      void unlistenPromise.then((un) => un());
+    };
+  }, []);
 
   // ---- Agent -------------------------------------------------------------
   const getAgent = (): AIAgent | null => {
@@ -387,22 +409,15 @@ function App() {
             </div>
           )}
         </div>
-        <div
-          className="pane-content"
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: filePath ? 'flex-start' : 'center',
-          }}
-        >
+        <div className="pane-content doc-host">
           {docLoading ? (
-            <p style={{ color: '#888' }}>{docLoading}</p>
+            <p className="doc-empty">{docLoading}</p>
           ) : filePath ? (
             <DocumentViewer ref={viewerRef} filePath={filePath} onTextSelected={setSelectedText} />
           ) : (
-            <p style={{ color: '#666' }}>No document opened</p>
+            <p className="doc-empty">未打开文档 — 点击上方按钮或将文件拖入窗口</p>
           )}
+          {dragging && <div className="drop-overlay">松开以打开文档</div>}
         </div>
       </div>
 

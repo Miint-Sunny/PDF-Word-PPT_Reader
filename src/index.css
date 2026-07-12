@@ -98,6 +98,136 @@ button:hover {
   background-color: #1177bb;
 }
 
+/* ---- Document viewer ---- */
+.doc-host {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  position: relative;
+}
+
+.doc-empty {
+  margin: auto;
+  color: #666;
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(14, 99, 156, 0.25);
+  border: 2px dashed #4fb3ff;
+  color: #cfe9ff;
+  font-size: 1.1rem;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.viewer {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.viewer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 10px;
+  background: #2b2b2b;
+  border-bottom: 1px solid #3a3a3a;
+  flex-wrap: wrap;
+}
+
+.viewer-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.viewer-zoom {
+  font-size: 0.8rem;
+  min-width: 40px;
+  text-align: center;
+  color: #bbb;
+}
+
+.viewer-page-input {
+  width: 42px;
+  text-align: center;
+  background: #222;
+  color: #eee;
+  border: 1px solid #555;
+  border-radius: 3px;
+  padding: 3px 4px;
+  font-size: 0.8rem;
+}
+
+.viewer-pagecount {
+  font-size: 0.8rem;
+  color: #bbb;
+}
+
+.viewer-search {
+  flex: 1;
+  min-width: 180px;
+  justify-content: flex-end;
+}
+
+.viewer-search-icon {
+  color: #888;
+}
+
+.viewer-search-input {
+  width: 140px;
+  background: #222;
+  color: #eee;
+  border: 1px solid #555;
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-size: 0.8rem;
+}
+
+.viewer-search-input:focus {
+  border-color: #007acc;
+  outline: none;
+}
+
+.viewer-matches {
+  font-size: 0.75rem;
+  color: #bbb;
+  white-space: nowrap;
+}
+
+.viewer-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  row-gap: 20px; /* must match PAGE_GAP */
+  padding: 20px; /* must match PAD */
+}
+
+.viewer-page {
+  position: relative;
+  flex-shrink: 0;
+  background: white;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+}
+
+.textLayer mark.search-hit {
+  background: rgba(255, 200, 0, 0.45);
+  color: transparent;
+  padding: 0;
+  border-radius: 2px;
+}
+
 /* ---- Chat pane ---- */
 .pane-header {
   display: flex;
