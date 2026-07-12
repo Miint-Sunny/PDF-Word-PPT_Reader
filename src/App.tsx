@@ -1,6 +1,7 @@
-import { useState, useEffect, KeyboardEvent, CSSProperties } from 'react';
+import { useState, useEffect, useRef, KeyboardEvent, CSSProperties } from 'react';
 import './index.css';
 import { DocumentViewer } from './components/DocumentViewer';
+import type { DocumentViewerHandle } from './components/DocumentViewer';
 import { AIAgent } from './lib/agent';
 import type { ChatMsg, Provider, ProviderConfig } from './lib/agent';
 import { extractTextFromPDF } from './lib/pdf';
@@ -23,6 +24,11 @@ function App() {
   const [filePath, setFilePath] = useState<string | null>(null);
   const [docText, setDocText] = useState<string>('');
   const [selectedText, setSelectedText] = useState<string>('');
+
+  // Vision: when enabled, attach the currently-visible page image to outgoing
+  // messages so multimodal models (Gemini, gpt-4o) can see figures/charts.
+  const viewerRef = useRef<DocumentViewerHandle>(null);
+  const [visionEnabled, setVisionEnabled] = useState<boolean>(false);
 
   // Provider configuration
   const [provider, setProvider] = useState<Provider>(
@@ -117,12 +123,22 @@ function App() {
     return new AIAgent({ provider, model, apiKey });
   };
 
+  // Build a user message, attaching the visible page image when vision is on.
+  const buildUserMsg = (content: string): ChatMsg => {
+    const msg: ChatMsg = { role: 'user', content };
+    if (visionEnabled && filePath) {
+      const img = viewerRef.current?.captureVisiblePage();
+      if (img) msg.images = [img];
+    }
+    return msg;
+  };
+
   const handleChat1Submit = async (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && chat1Input.trim()) {
       const agent = getAgent();
       if (!agent) return;
 
-      const newMsgs: ChatMsg[] = [...chat1Msgs, { role: 'user', content: chat1Input }];
+      const newMsgs: ChatMsg[] = [...chat1Msgs, buildUserMsg(chat1Input)];
       setChat1Msgs(newMsgs);
       setChat1Input('');
       setIsChat1Loading(true);
@@ -147,7 +163,7 @@ function App() {
         ? `Regarding the selected text: "${selectedText}"\n\n${chat2Input}`
         : chat2Input;
 
-      const newMsgs: ChatMsg[] = [...chat2Msgs, { role: 'user', content: prompt }];
+      const newMsgs: ChatMsg[] = [...chat2Msgs, buildUserMsg(prompt)];
       setChat2Msgs(newMsgs);
       setChat2Input('');
       setIsChat2Loading(true);
@@ -209,6 +225,19 @@ function App() {
                 style={{ ...inputStyle, width: '200px' }}
               />
             )}
+
+            <label
+              style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', color: '#ccc' }}
+              title="Attach the current page as an image so vision-capable models (Gemini, gpt-4o) can see figures & charts"
+            >
+              <input
+                type="checkbox"
+                checked={visionEnabled}
+                onChange={(e) => setVisionEnabled(e.target.checked)}
+                disabled={!filePath}
+              />
+              🖼 Vision
+            </label>
           </div>
 
           {provider === 'vertex' && (
@@ -255,7 +284,7 @@ function App() {
           }}
         >
           {filePath ? (
-            <DocumentViewer filePath={filePath} onTextSelected={setSelectedText} />
+            <DocumentViewer ref={viewerRef} filePath={filePath} onTextSelected={setSelectedText} />
           ) : (
             <p style={{ color: '#666' }}>No document opened</p>
           )}

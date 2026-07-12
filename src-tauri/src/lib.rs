@@ -231,10 +231,14 @@ fn run_osascript(script: &str, temp_pdf_path: &Path) -> Result<(), String> {
 fn osascript_ms_office(file_path: &str, is_ppt: bool, temp_pdf_path: &Path) -> Result<(), String> {
     let in_path = applescript_escape(file_path);
     let out_path = applescript_escape(&temp_pdf_path.to_string_lossy());
+    // Use `active document` / `active presentation` rather than the return value
+    // of `open` (Word's `open` does not reliably yield a document reference —
+    // caught a "variable d is not defined" (-2753) error relying on that).
     let script = if is_ppt {
         format!(
             "tell application \"Microsoft PowerPoint\"\n\
-             set p to open \"{in_p}\"\n\
+             open \"{in_p}\"\n\
+             set p to active presentation\n\
              save p in (POSIX file \"{out_p}\") as save as PDF\n\
              close p saving no\n\
              end tell",
@@ -244,7 +248,8 @@ fn osascript_ms_office(file_path: &str, is_ppt: bool, temp_pdf_path: &Path) -> R
     } else {
         format!(
             "tell application \"Microsoft Word\"\n\
-             set d to open file name (POSIX file \"{in_p}\")\n\
+             open (POSIX file \"{in_p}\")\n\
+             set d to active document\n\
              save as d file name (POSIX file \"{out_p}\") file format format PDF\n\
              close d saving no\n\
              end tell",
