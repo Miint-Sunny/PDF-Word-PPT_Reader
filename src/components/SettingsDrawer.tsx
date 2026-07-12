@@ -21,6 +21,10 @@ export interface SettingsDrawerProps {
   theme: string;
   setTheme: (t: string) => void;
   localStatus: string;
+  autoSummary: boolean;
+  setAutoSummary: (v: boolean) => void;
+  ragEnabled: boolean;
+  setRagEnabled: (v: boolean) => void;
 }
 
 const PROVIDER_LABELS: Record<Provider, string> = {
@@ -51,6 +55,10 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
     theme,
     setTheme,
     localStatus,
+    autoSummary,
+    setAutoSummary,
+    ragEnabled,
+    setRagEnabled,
   } = props;
 
   if (!open) return null;
@@ -134,6 +142,42 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
                 {localStatus && <div className="status-line">{localStatus}</div>}
               </div>
             )}
+          </div>
+
+          <div className="drawer-section">
+            <div className="drawer-section-title">智能功能</div>
+            <div className="switch-row">
+              <span className="switch-label">
+                打开文档后自动摘要
+                <span className="switch-desc">
+                  会立即调用当前模型、消耗 AI 额度 — 因此默认关闭
+                </span>
+              </span>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={autoSummary}
+                  onChange={(e) => setAutoSummary(e.target.checked)}
+                />
+                <span className="track" />
+              </label>
+            </div>
+            <div className="switch-row">
+              <span className="switch-label">
+                长文档本地检索 (RAG)
+                <span className="switch-desc">
+                  按问题检索相关片段替代截断;首次使用下载约 25MB 嵌入模型,纯本地、不耗云额度
+                </span>
+              </span>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={ragEnabled}
+                  onChange={(e) => setRagEnabled(e.target.checked)}
+                />
+                <span className="track" />
+              </label>
+            </div>
           </div>
 
           <div className="drawer-section">

@@ -4,12 +4,15 @@ import { FolderOpen, Image, Settings } from 'lucide-react';
 import { DocumentViewer } from './components/DocumentViewer';
 import type { DocumentViewerHandle } from './components/DocumentViewer';
 import { ChatPane } from './components/ChatPane';
+import type { ChatPaneHandle } from './components/ChatPane';
 import { SettingsDrawer } from './components/SettingsDrawer';
 import { AIAgent, cancelLlm } from './lib/agent';
 import type { ChatMsg, Provider, ProviderConfig } from './lib/agent';
 import { secretGet, secretSet, secretDelete } from './lib/secrets';
 import { extractTextFromPDF } from './lib/pdf';
-import { open } from '@tauri-apps/plugin-dialog';
+import { buildRagIndex, ragRetrieve, RAG_MIN_DOC_CHARS } from './lib/rag';
+import type { RagIndex } from './lib/rag';
+import { open, save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 
@@ -48,6 +51,33 @@ function App() {
 
   // Local (offline) model load/generation status.
   const [localStatus, setLocalStatus] = useState<string>('');
+
+  // Smart features — anything that can spend AI quota before an explicit user
+  // action defaults to OFF (user rule); RAG is local-only but downloads a model
+  // on first use, so it is opt-in too.
+  const [autoSummary, setAutoSummary] = useState<boolean>(
+    () => persisted('autoSummary', 'false') === 'true'
+  );
+  const [ragEnabled, setRagEnabled] = useState<boolean>(
+    () => persisted('ragEnabled', 'false') === 'true'
+  );
+  useEffect(() => {
+    localStorage.setItem('autoSummary', String(autoSummary));
+    localStorage.setItem('ragEnabled', String(ragEnabled));
+  }, [autoSummary, ragEnabled]);
+
+  const [ragStatus, setRagStatus] = useState<string>('');
+  const ragIndexRef = useRef<{ key: string; index: RagIndex } | null>(null);
+
+  // Fresh doc text for callbacks that may fire right after openPath.
+  const docTextRef = useRef('');
+  useEffect(() => {
+    docTextRef.current = docText;
+  }, [docText]);
+
+  // Floating "ask about selection" button position.
+  const [selAsk, setSelAsk] = useState<{ x: number; y: number } | null>(null);
+  const chat2Ref = useRef<ChatPaneHandle>(null);
 
   // Settings drawer & theme
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -290,6 +320,35 @@ function App() {
     return new AIAgent({ provider, model, apiKey });
   };
 
+  // True when the current provider is fully configured (no alerts).
+  const canChat = (): boolean => {
+    if (provider === 'local') return true;
+    if (provider === 'vertex') return !!(vertexProject && vertexLocation && vertexSaJson);
+    return !!apiKey;
+  };
+
+  // Document context for a question: full text normally; when RAG is enabled
+  // and the doc is long, retrieve the most relevant chunks instead (local
+  // embeddings — no cloud quota). Falls back to full text on any failure.
+  const getDocContext = async (question: string): Promise<string> => {
+    const text = docTextRef.current;
+    if (!ragEnabled || text.length < RAG_MIN_DOC_CHARS) return text;
+    try {
+      const key = filePath ?? '';
+      if (!ragIndexRef.current || ragIndexRef.current.key !== key) {
+        const index = await buildRagIndex(text, setRagStatus);
+        ragIndexRef.current = { key, index };
+      }
+      const excerpt = await ragRetrieve(ragIndexRef.current.index, question, setRagStatus);
+      setRagStatus('');
+      return `【以下是按当前问题从长文档中检索出的相关片段(非全文)】\n\n${excerpt}`;
+    } catch (e) {
+      console.error('RAG failed, falling back to full text:', e);
+      setRagStatus('');
+      return text;
+    }
+  };
+
   // Build a user message, attaching the visible page image when vision is on.
   const buildUserMsg = (content: string): ChatMsg => {
     const msg: ChatMsg = { role: 'user', content };
@@ -319,7 +378,8 @@ function App() {
     chat1Req.current = requestId;
 
     try {
-      const reply = await agent.askGlobalContext(base, docText, {
+      const context = await getDocContext(text);
+      const reply = await agent.askGlobalContext(base, context, {
         requestId,
         onDelta: appendDelta(setChat1Msgs),
       });
@@ -347,7 +407,8 @@ function App() {
     chat2Req.current = requestId;
 
     try {
-      const reply = await agent.askDetail(chat1Msgs, base, docText, selectedText, {
+      const context = await getDocContext(text);
+      const reply = await agent.askDetail(chat1Msgs, base, context, selectedText, {
         requestId,
         onDelta: appendDelta(setChat2Msgs),
       });
@@ -366,6 +427,56 @@ function App() {
   const stopChat2 = () => {
     if (chat2Req.current) cancelLlm(chat2Req.current).catch(() => {});
   };
+
+  // Auto-summary on open — opt-in (defaults OFF: it spends AI quota without a
+  // per-message confirmation). Runs once per document, only into an empty
+  // Chat 1, and silently skips when the provider isn't configured.
+  const autoSummaryDoneFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!autoSummary || !filePath || !docText) return;
+    if (autoSummaryDoneFor.current === filePath) return;
+    if (chat1Msgs.length > 0 || isChat1Loading) return;
+    if (!canChat()) return;
+    autoSummaryDoneFor.current = filePath;
+    void sendChat1('请给出这份文档的全局摘要:主题、结构、关键要点与结论。');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSummary, filePath, docText, chat1Msgs.length]);
+
+  // Export a conversation as Markdown via the save dialog.
+  const exportChat = (which: 1 | 2) => async () => {
+    const msgs = which === 1 ? chat1Msgs : chat2Msgs;
+    if (!msgs.length) return;
+    const roleLabel = (r: string) => (r === 'user' ? '👤 用户' : r === 'assistant' ? '🤖 助手' : '⚠️ 系统');
+    const md =
+      `# ${docName || '对话'} — Chat ${which}\n\n` +
+      msgs.map((m) => `### ${roleLabel(m.role)}\n\n${m.content}\n`).join('\n');
+    const base = (docName || 'export').replace(/\.[^.]+$/, '');
+    const path = await save({
+      defaultPath: `${base}-chat${which}.md`,
+      filters: [{ name: 'Markdown', extensions: ['md'] }],
+    });
+    if (path) {
+      try {
+        await invoke('write_text_file', { path, content: md });
+      } catch (e: any) {
+        alert(`导出失败: ${e.message || e}`);
+      }
+    }
+  };
+
+  // Selection → floating "ask in Chat 2" affordance (focus only, never sends).
+  const handleTextSelected = (text: string, pos?: { x: number; y: number }) => {
+    setSelectedText(text);
+    if (pos) setSelAsk(pos);
+  };
+
+  useEffect(() => {
+    const hide = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest?.('.sel-ask')) setSelAsk(null);
+    };
+    window.addEventListener('mousedown', hide);
+    return () => window.removeEventListener('mousedown', hide);
+  }, []);
 
   return (
     <div className="app-container" ref={containerRef}>
@@ -405,7 +516,7 @@ function App() {
           {docLoading ? (
             <p className="doc-empty">{docLoading}</p>
           ) : filePath ? (
-            <DocumentViewer ref={viewerRef} filePath={filePath} onTextSelected={setSelectedText} />
+            <DocumentViewer ref={viewerRef} filePath={filePath} onTextSelected={handleTextSelected} />
           ) : (
             <p className="doc-empty">未打开文档 — 点击左上角按钮或将文件拖入窗口</p>
           )}
@@ -422,10 +533,13 @@ function App() {
           placeholder="输入问题,回车发送…"
           msgs={chat1Msgs}
           loading={isChat1Loading}
-          statusLine={provider === 'local' && isChat1Loading ? localStatus : undefined}
+          statusLine={
+            isChat1Loading ? ragStatus || (provider === 'local' ? localStatus : undefined) : undefined
+          }
           onSend={sendChat1}
           onStop={stopChat1}
           onClear={() => setChat1Msgs([])}
+          onExport={exportChat(1)}
         />
       </div>
 
@@ -433,15 +547,19 @@ function App() {
 
       <div className="chat-pane" style={{ flex: 1 }}>
         <ChatPane
+          ref={chat2Ref}
           title="Chat 2 · 细节追问"
           hint="针对细节深入追问;会携带 Chat 1 的上下文与当前选中文本。"
           placeholder="追问细节,回车发送…"
           msgs={chat2Msgs}
           loading={isChat2Loading}
-          statusLine={provider === 'local' && isChat2Loading ? localStatus : undefined}
+          statusLine={
+            isChat2Loading ? ragStatus || (provider === 'local' ? localStatus : undefined) : undefined
+          }
           onSend={sendChat2}
           onStop={stopChat2}
           onClear={() => setChat2Msgs([])}
+          onExport={exportChat(2)}
         />
       </div>
 
@@ -465,7 +583,27 @@ function App() {
         theme={theme}
         setTheme={setTheme}
         localStatus={localStatus}
+        autoSummary={autoSummary}
+        setAutoSummary={setAutoSummary}
+        ragEnabled={ragEnabled}
+        setRagEnabled={setRagEnabled}
       />
+
+      {selAsk && selectedText && (
+        <button
+          className="sel-ask"
+          style={{
+            left: Math.min(selAsk.x + 8, window.innerWidth - 130),
+            top: Math.min(selAsk.y + 12, window.innerHeight - 44),
+          }}
+          onClick={() => {
+            chat2Ref.current?.focus();
+            setSelAsk(null);
+          }}
+        >
+          ↗ 在 Chat 2 中提问
+        </button>
+      )}
     </div>
   );
 }

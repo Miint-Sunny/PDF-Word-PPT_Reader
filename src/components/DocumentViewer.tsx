@@ -22,7 +22,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 
 interface DocumentViewerProps {
   filePath: string;
-  onTextSelected?: (text: string) => void;
+  onTextSelected?: (text: string, pos?: { x: number; y: number }) => void;
 }
 
 // Imperative handle so the parent can grab a page image for vision models.
@@ -400,10 +400,10 @@ export const DocumentViewer = forwardRef<DocumentViewerHandle, DocumentViewerPro
       },
     }));
 
-    const handleMouseUp = () => {
+    const handleMouseUp = (e: React.MouseEvent) => {
       const text = window.getSelection()?.toString();
       if (text && text.trim().length > 0 && onTextSelected) {
-        onTextSelected(text.trim());
+        onTextSelected(text.trim(), { x: e.clientX, y: e.clientY });
       }
     };
 

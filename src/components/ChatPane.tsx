@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, KeyboardEvent } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  forwardRef,
+  useImperativeHandle,
+  KeyboardEvent,
+} from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Copy, Check, Trash2, Square, Send, Download } from 'lucide-react';
@@ -17,23 +24,24 @@ interface ChatPaneProps {
   onExport?: () => void;
 }
 
+export interface ChatPaneHandle {
+  focus: () => void;
+}
+
 // One chat column: header (title + actions), scrolling message list, input row.
-export function ChatPane({
-  title,
-  hint,
-  placeholder,
-  msgs,
-  loading,
-  statusLine,
-  onSend,
-  onStop,
-  onClear,
-  onExport,
-}: ChatPaneProps) {
+export const ChatPane = forwardRef<ChatPaneHandle, ChatPaneProps>(function ChatPane(
+  { title, hint, placeholder, msgs, loading, statusLine, onSend, onStop, onClear, onExport },
+  ref
+) {
   const [input, setInput] = useState('');
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const stickToBottom = useRef(true);
+
+  useImperativeHandle(ref, () => ({
+    focus: () => inputRef.current?.focus(),
+  }));
 
   // Track whether the user has scrolled away from the bottom; only auto-scroll
   // while they're at (or near) the bottom so reading back isn't hijacked.
@@ -137,6 +145,7 @@ export function ChatPane({
 
       <div className="chat-input-container">
         <input
+          ref={inputRef}
           type="text"
           className="chat-input"
           placeholder={placeholder}
@@ -157,4 +166,4 @@ export function ChatPane({
       </div>
     </div>
   );
-}
+});
